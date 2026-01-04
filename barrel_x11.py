@@ -1,1337 +1,902 @@
 #!/usr/bin/python
 import os
-from ttkthemes import ThemedTk
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
-from ttkthemes import ThemedTk, ThemedStyle
 import shutil
 import subprocess
 import json
-import glob
-import requests
-import urllib.request
-import tarfile
-import tempfile
-import zipfile
-import re
 import sys
-import time
-import webbrowser
 from pathlib import Path
-from shutil import SameFileError
 
 # Local imports
 from app import __version__, __app_name__
 from app import config
 from app import shortcuts
 from app import templates
-from app import updater
 from app import installers
-
-
-# === XDG Base Directory Spec ===
-XDG_CONFIG_HOME = Path(os.getenv('XDG_CONFIG_HOME', Path.home() / '.config'))
-CONFIG_DIR = XDG_CONFIG_HOME / 'shortcut_launcher'
-CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-
-XDG_DATA_HOME = Path(os.getenv('XDG_DATA_HOME', Path.home() / '.local' / 'share'))
-DATA_DIR = XDG_DATA_HOME / 'shortcut_launcher'
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-XDG_CACHE_HOME = Path(os.getenv('XDG_CACHE_HOME', Path.home() / '.cache'))
-CACHE_DIR = XDG_CACHE_HOME / 'shortcut_launcher'
-CACHE_DIR.mkdir(parents=True, exist_ok=True)
-
+from app import actions
+from app import view_controller
+from app import updater
 
 class ShortcutLauncher:
     def __init__(self, root):
         self.root = root
         self.root.title(f"{__app_name__} {__version__}")
-        self.root.geometry("900x600")
+        self.root.geometry("800x600")
         
-        # Setup theme variables
-        self.bg_color = "#333333"
-        self.fg_color = "#ffffff"
-        self.accent_color = "#4a6baf"
-        self.error_color = "#ff4444"
-        
-        # Directories
         self.HOME = os.path.expanduser("~")
-        self.SHORTCUTS_DIR = str(DATA_DIR / 'shortcuts')
-        self.TEMPLATES_DIR = str(DATA_DIR / 'templates')
-        os.makedirs(self.SHORTCUTS_DIR, exist_ok=True)
-        os.makedirs(self.TEMPLATES_DIR, exist_ok=True)
+        self.controller = view_controller.ViewController()
         
-        # Repository URLs
-        self.TEMPLATE_RELEASES = f"{config.TEMPLATE_REPO}/releases/tag/TMP"
-        self.APP_RELEASES = f"{config.APP_REPO}/releases/tag/Version"
-        
-        # Setup styles and theme
-        self.style = ThemedStyle(self.root)
-        self.current_theme = tk.StringVar(value="dark")
+        # Track running processes: {filename: Popen_object}
+        self.running_processes = {}
+
+        # Theme Setup
+        self.style = ttk.Style()
+        self.current_theme = config.get_setting("theme", "light")
         self.apply_theme()
         
-        # Ensure prefixes file exists
-        if not config.PREFIXES_FILE.exists():
-            config.save_prefixes([])
-        
         self.create_menu()
-        self.root.configure(bg=self.bg_color)
-        self.root.option_add('*Menu.background', self.bg_color)
-        self.root.option_add('*Menu.foreground', self.fg_color)
-        self.root.option_add('*Menu.activeBackground', '#555555')
-        self.root.option_add('*Menu.activeForeground', self.accent_color)
         self.create_main_frame()
         self.notify_runners()
-
-    def setup_styles(self):
-        """Configure all ttk styles"""
-        self.style.configure('.', font=('Arial', 10))
-        
-        # Main styles
-        self.style.configure('TFrame', background=self.bg_color)
-        self.style.configure('TLabel', background=self.bg_color, foreground=self.fg_color)
-        self.style.configure('TButton', padding=5)
-        self.style.configure('TEntry', fieldbackground='#555555')
-        self.style.configure('TCombobox', fieldbackground='#555555')
-        
-        # Custom styles
-        self.style.configure('Header.TLabel', 
-                           font=('Arial', 14, 'bold'), 
-                           padding=10,
-                           background=self.bg_color,
-                           foreground=self.accent_color)
-        
-        self.style.configure('Section.TLabel',
-                           font=('Arial', 12, 'bold'),
-                           background=self.bg_color,
-                           foreground=self.fg_color)
-        
-        self.style.configure('Item.TFrame',
-                           background='#444444',
-                           relief='groove',
-                           borderwidth=1)
-        
-        self.style.configure('Error.TLabel',
-                           foreground=self.error_color)
-        
-        self.style.map('TButton',
-                      background=[('active', '#555555')],
-                      foreground=[('active', self.accent_color)])
+        self.poll_processes()
 
     def apply_theme(self):
-        """Apply the selected theme"""
-        t = self.current_theme.get()
-        if t == "dark":
-            self.style.set_theme("equilux")
-            self.bg_color = "#333333"
-            self.fg_color = "#ffffff"
-            self.accent_color = "#4a6baf"
+        theme = self.current_theme
+        
+        if theme == "dark":
+            self.style.theme_use('clam') # 'clam' allows easier color customization than 'vista' or 'aqua'
+            
+            bg_color = "#2d2d2d"
+            fg_color = "#ffffff"
+            acc_color = "#4a4a4a"
+            hl_color = "#3e3e3e"
+            
+            self.root.configure(bg=bg_color)
+            
+            self.style.configure(".", background=bg_color, foreground=fg_color, fieldbackground=acc_color)
+            self.style.configure("TFrame", background=bg_color)
+            self.style.configure("TLabel", background=bg_color, foreground=fg_color)
+            self.style.configure("TButton", background=acc_color, foreground=fg_color, bordercolor=hl_color)
+            self.style.map("TButton", background=[("active", hl_color)])
+            
+            self.style.configure("TEntry", fieldbackground=acc_color, foreground=fg_color)
+            self.style.configure("TCombobox", fieldbackground=acc_color, foreground=fg_color, arrowcolor=fg_color)
+            
+            self.style.configure("TLabelframe", background=bg_color, foreground=fg_color)
+            self.style.configure("TLabelframe.Label", background=bg_color, foreground=fg_color)
+            
+            # Scrollbar (simple dark)
+            self.style.configure("Vertical.TScrollbar", troughcolor=bg_color, background=acc_color, arrowcolor=fg_color)
+            
         else:
-            self.style.set_theme("arc")
-            self.bg_color = "#f5f5f5"
-            self.fg_color = "#000000"
-            self.accent_color = "#4a6baf"
-         
-        self.setup_styles()
+            # Reset to standard
+            # 'default' or 'clam' with default colors. 
+            # Often 'clam' is nicer than 'default' on Termux X11.
+            self.style.theme_use('clam') 
+            
+            # Reset colors to defaults (hard to "unset", so we set to standard grays)
+            default_bg = "#d9d9d9"
+            default_fg = "black"
+            default_field = "white"
+            
+            self.root.configure(bg=default_bg)
+            self.style.configure(".", background=default_bg, foreground=default_fg, fieldbackground=default_field)
+            self.style.configure("TFrame", background=default_bg)
+            self.style.configure("TLabel", background=default_bg, foreground=default_fg)
+            self.style.configure("TButton", background=default_bg, foreground=default_fg)
+            self.style.map("TButton", background=[("active", "#ececec")])
+            
+            self.style.configure("TEntry", fieldbackground=default_field, foreground="black")
+            
+            self.style.configure("TLabelframe", background=default_bg, foreground=default_fg)
+            self.style.configure("TLabelframe.Label", background=default_bg, foreground=default_fg)
 
-    def create_menu(self):
-        """Create the main menu bar"""
-        menubar = tk.Menu(self.root)
+    def toggle_theme(self):
+        if self.current_theme == "light":
+            self.current_theme = "dark"
+        else:
+            self.current_theme = "light"
         
-        # File menu
-        file_menu = tk.Menu(menubar, tearoff=0)
-        file_menu.add_command(label="Exit", command=self.root.quit)
-        menubar.add_cascade(label="File", menu=file_menu)
-        
-        # View menu
-        view_menu = tk.Menu(menubar, tearoff=0)
-        theme_menu = tk.Menu(view_menu, tearoff=0)
-        theme_menu.add_radiobutton(label="Light", variable=self.current_theme, value="light", command=self.apply_theme)
-        theme_menu.add_radiobutton(label="Dark", variable=self.current_theme, value="dark", command=self.apply_theme)
-        view_menu.add_cascade(label="Theme", menu=theme_menu)
-        menubar.add_cascade(label="View", menu=view_menu)
-        
-        # Main functions
-        menubar.add_command(label="Shortcuts", command=self.list_shortcuts)
-        menubar.add_command(label="Templates", command=self.list_templates)
-        menubar.add_command(label="Prefixes", command=self.manage_prefixes)
-        
-        # Help menu
-        help_menu = tk.Menu(menubar, tearoff=0)
-        help_menu.add_command(label="About", command=self.show_about)
-        help_menu.add_command(label="Check for Updates", command=self.check_app_update)
-        menubar.add_cascade(label="Help", menu=help_menu)
-        
-        self.root.config(menu=menubar)
-
-    def create_main_frame(self):
-        """Create the main application frame"""
-        if hasattr(self, 'main_frame'):
-            self.main_frame.destroy()
-        
-        self.main_frame = ttk.Frame(self.root)
-        self.main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        # Header
-        ttk.Label(self.main_frame, 
-                 text=f"{__app_name__} {__version__}",
-                 style="Header.TLabel").pack(pady=20)
-        
-        # Main buttons
-        btn_frame = ttk.Frame(self.main_frame)
-        btn_frame.pack(pady=20)
-        
-        ttk.Button(btn_frame, 
-                  text="Shortcuts", 
-                  width=20,
-                  command=self.list_shortcuts).pack(pady=10, padx=10)
-        
-        ttk.Button(btn_frame, 
-                  text="Templates", 
-                  width=20,
-                  command=self.list_templates).pack(pady=10, padx=10)
-        
-        ttk.Button(btn_frame,
-                  text="Wine Prefixes",
-                  width=20,
-                  command=self.manage_prefixes).pack(pady=10, padx=10)
-
-    # ... [restul metodelor rămân la fel ca în codul original]
-    # List shortcuts, templates, manage prefixes etc.
-
-    def notify_runners(self):
-        """Check for available runners and notify if none found"""
-        self.runners = []
-        for bin_name in ["wine", "proton", "hangover-wine"]:
-            if shutil.which(bin_name):
-                self.runners.append(bin_name)
-        
-        if not self.runners:
-            messagebox.showwarning(
-                "Warning",
-                "⚠️ No installed runners found (wine, proton, hangover-wine, etc.)!"
-            )
-
-    def clear_main_frame(self):
-        """Clear the main frame"""
-        for widget in self.main_frame.winfo_children():
-            widget.destroy()
-
-    def go_back(self):
-        """Return to main screen"""
+        config.set_setting("theme", self.current_theme)
+        self.apply_theme()
+        # Refresh UI to ensure all widgets redraw with new style
+        # (Though configure usually handles it, sometimes forceful redraw helps)
         self.create_main_frame()
+
+    def _setup_scrollable_area(self, parent):
+        # Container for canvas + scrollbar
+        container = ttk.Frame(parent)
+        container.pack(fill=tk.BOTH, expand=True)
         
-    def _load_icon_for_gui(self, icon_path, size=(32, 32)):
-        if not icon_path or not os.path.exists(icon_path):
-            return None
-        try:
-            from PIL import Image, ImageTk
-        except ImportError:
-            return None  # nu avem Pillow, nu încărcăm iconița
-
-        try:
-            img = Image.open(icon_path)
-            if getattr(img, 'mode', None) == 'RGBA':
-                bg = Image.new('RGB', img.size, (255,255,255))
-                bg.paste(img, mask=img.split()[3])
-                img = bg
-            img.thumbnail(size)
-            return ImageTk.PhotoImage(img)
-        except Exception:
-            return None
-
-
-            
-    def _validate_icon(self, icon_path):
-        if not icon_path or icon_path == "application-x-executable":
-            return True  # Iconița default este întotdeauna validă
-        return os.path.exists(icon_path)
+        # Canvas needs to match theme bg
+        bg_col = self.style.lookup("TFrame", "background")
+        canvas = tk.Canvas(container, bg=bg_col, highlightthickness=0)
         
-    def cleanup_icons(self):
-        """Delete unused icons"""
-        icons_dir = os.path.join(self.SHORTCUTS_DIR, "icons")
-        if not os.path.exists(icons_dir):
-            return
-            
-        used_icons = set()
-        desktop_dir = os.path.join(self.HOME, "Desktop") if os.path.exists(os.path.join(self.HOME, "Desktop")) else self.HOME
-        
-        # Collect all used icons
-        for f in os.listdir(desktop_dir):
-            if f.endswith(".desktop"):
-                with open(os.path.join(desktop_dir, f), 'r') as file:
-                    for line in file:
-                        if line.startswith("Icon="):
-                            icon_path = line.split("=", 1)[1].strip()
-                            if os.path.isabs(icon_path):
-                                used_icons.add(icon_path)
-        
-        # Delete unused icons
-        for icon_file in os.listdir(icons_dir):
-            icon_path = os.path.join(icons_dir, icon_file)
-            if icon_path not in used_icons:
-                try:
-                    os.remove(icon_path)
-                except Exception as e:
-                    print(f"Error deleting icon {icon_path}: {e}")
-
-    def list_shortcuts(self):
-        self.clear_main_frame()
-
-        header = ttk.Frame(self.main_frame)
-        header.pack(fill=tk.X, pady=5)
-        ttk.Label(header, text="Shortcuts", style="Header.TLabel").pack(side=tk.LEFT)
-        ttk.Button(header, text="Add", command=self.add_shortcut).pack(side=tk.RIGHT)
-
-        canvas = tk.Canvas(self.main_frame, bg=self.bg_color, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(self.main_frame, orient="vertical", command=canvas.yview)
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
         scrollable_frame = ttk.Frame(canvas)
 
         scrollable_frame.bind(
             "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+            lambda e: canvas.configure(
+                scrollregion=canvas.bbox("all")
+            )
         )
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+
+        frame_id = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        
+        # Ensure the inner frame resizes with the canvas
+        def _configure_canvas(event):
+            canvas.itemconfig(frame_id, width=event.width)
+        canvas.bind("<Configure>", _configure_canvas)
+
         canvas.configure(yscrollcommand=scrollbar.set)
 
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
+        
+        # Scrolling
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        def _on_linux_scroll_up(event):
+             canvas.yview_scroll(-1, "units")
+        def _on_linux_scroll_down(event):
+             canvas.yview_scroll(1, "units")
+             
+        # Bind only when mouse is over the canvas
+        def _bind_mouse(event):
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+            canvas.bind_all("<Button-4>", _on_linux_scroll_up)
+            canvas.bind_all("<Button-5>", _on_linux_scroll_down)
+        def _unbind_mouse(event):
+            canvas.unbind_all("<MouseWheel>")
+            canvas.unbind_all("<Button-4>")
+            canvas.unbind_all("<Button-5>")
 
-        apps_dir = Path(os.getenv('XDG_DATA_HOME', Path.home()/'.local'/'share')) / 'applications' / 'shortcuts'
-        apps_dir.mkdir(parents=True, exist_ok=True)
-        shortcuts = []  # will contain (display_name, filename)
+        canvas.bind("<Enter>", _bind_mouse)
+        canvas.bind("<Leave>", _unbind_mouse)
 
-        for fname in os.listdir(apps_dir):
-            if not fname.endswith(".desktop"):
-                continue
-            path = os.path.join(apps_dir, fname)
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    lines = f.read().splitlines()
-            except:
-                continue
+        return scrollable_frame
 
-            # extract display name
-            display = next((l.lstrip().split("=",1)[1] for l in lines if l.lstrip().startswith("Name=")), None)
-            if not display:
-                display = os.path.splitext(fname)[0]
+    def create_menu(self):
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+        
+        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="Exit", command=self.root.quit)
+        menubar.add_cascade(label="File", menu=file_menu)
+        
+        view_menu = tk.Menu(menubar, tearoff=0)
+        view_menu.add_command(label="Toggle Dark Mode", command=self.toggle_theme)
+        menubar.add_cascade(label="View", menu=view_menu)
+        
+        menubar.add_command(label="Shortcuts", command=self.list_shortcuts)
+        menubar.add_command(label="Templates", command=self.list_templates)
+        menubar.add_command(label="Prefixes", command=self.manage_prefixes)
+        
+        help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(label="Check for Updates", command=self.check_updates)
+        help_menu.add_command(label="About", command=self.show_about)
+        menubar.add_cascade(label="Help", menu=help_menu)
 
-            shortcuts.append((display, fname))
-
-        # display
-        if not shortcuts:
-            ttk.Label(scrollable_frame, text="No shortcuts available.").pack(pady=10)
+    def check_updates(self):
+        avail, msg = updater.check_for_updates()
+        if avail:
+            if messagebox.askyesno("Update Available", f"{msg}\n\nDo you want to update now?"):
+                succ, u_msg = updater.perform_update()
+                if succ:
+                    messagebox.showinfo("Success", u_msg)
+                    updater.restart_app()
+                else:
+                    messagebox.showerror("Update Failed", u_msg)
         else:
-            for display, fname in shortcuts:
-                # send display and filename
-                self._create_shortcut_item(scrollable_frame, display, fname)
+            messagebox.showinfo("Update Check", msg)
 
+    def create_main_frame(self):
+        if hasattr(self, 'main_frame'):
+            self.main_frame.destroy()
+        
+        self.main_frame = ttk.Frame(self.root, padding="10")
+        self.main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        ttk.Label(self.main_frame, text=f"{__app_name__} {__version__}", font=("", 14, "bold")).pack(pady=10)
+        
+        btn_frame = ttk.Frame(self.main_frame)
+        btn_frame.pack(pady=10)
+        
+        ttk.Button(btn_frame, text="Shortcuts", command=self.list_shortcuts).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Templates", command=self.list_templates).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Wine Prefixes", command=self.manage_prefixes).pack(side=tk.LEFT, padx=5)
 
-    # Definirea corectă:
-    def _create_shortcut_item(self, parent, display_name, filename):
-        frame = ttk.Frame(parent, style="Item.TFrame")
-        frame.pack(fill=tk.X, pady=5, padx=5)
+    def notify_runners(self):
+        self.runners = self._get_runners()
+        if not self.runners:
+            messagebox.showwarning("Warning", "No installed runners found!")
 
-        # Încarcă iconița (aici nu modifici)
-        desktop_dir = (
-            os.path.join(self.HOME, "Desktop")
-            if os.path.exists(os.path.join(self.HOME, "Desktop"))
-            else self.HOME
-        )
-        desktop_file = os.path.join(desktop_dir, filename)
-        icon_path = self._get_icon_from_desktop(desktop_file)
+    def poll_processes(self):
+        """Check status of running processes and refresh UI if any stopped."""
+        ended = []
+        for filename, proc in self.running_processes.items():
+            if proc.poll() is not None:
+                ended.append(filename)
+        
+        if ended:
+            for f in ended:
+                del self.running_processes[f]
+            # Only refresh if we are currently looking at the shortcuts list
+            # We can check if 'scroll_frame' exists or just blindly refresh if simple
+            # Ideally, we should just update the specific buttons, but full refresh is easier for now.
+            # To avoid disrupting user navigation, we might need a more targeted update in future.
+            if hasattr(self, 'current_view') and self.current_view == 'shortcuts':
+                self.list_shortcuts()
 
-        # Frame icon + nume
-        icon_name_frame = ttk.Frame(frame)
-        icon_name_frame.pack(side=tk.LEFT, padx=10, fill=tk.X, expand=True)
+        self.root.after(1000, self.poll_processes)
 
-        # Icon
-        icon_img = None
-        if icon_path and os.path.exists(icon_path):
-            try:
-                icon_img = tk.PhotoImage(file=icon_path)
-            except Exception:
-                icon_img = None
-        if icon_img:
-            lbl_icon = ttk.Label(icon_name_frame, image=icon_img)
-            lbl_icon.image = icon_img
-            lbl_icon.pack(side=tk.LEFT, padx=(0,5))
+    def clear_main_frame(self):
+        for widget in self.main_frame.winfo_children():
+            widget.destroy()
 
-        # Afișăm display_name, nu filename
-        ttk.Label(icon_name_frame, text=display_name, font=("Arial", 12)).pack(side=tk.LEFT, anchor="w")
+    def go_back(self):
+        self.create_main_frame()
 
-        # Buttons
+    def list_shortcuts(self):
+        self.clear_main_frame()
+        self.current_view = 'shortcuts'
+        
+        header = ttk.Frame(self.main_frame)
+        header.pack(fill=tk.X, pady=5)
+        ttk.Label(header, text="Shortcuts", font=("", 12, "bold")).pack(side=tk.LEFT)
+        
+        # Actions
+        ttk.Button(header, text="Add Shortcut", command=self.add_shortcut).pack(side=tk.RIGHT)
+        ttk.Button(header, text="Kill Wine", command=self.kill_wine).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(header, text="Back", command=self.go_back).pack(side=tk.RIGHT, padx=5)
+
+        # Create scrollable area
+        scroll_frame = self._setup_scrollable_area(self.main_frame)
+
+        shortcuts_data = self.controller.get_shortcuts_data()
+
+        if not shortcuts_data:
+            ttk.Label(scroll_frame, text="No shortcuts found.").pack(pady=20)
+        else:
+            for item in shortcuts_data:
+                self._create_shortcut_item(scroll_frame, item)
+
+    def _create_shortcut_item(self, parent, item):
+        filename = item['filename']
+        path = item['path']
+        
+        frame = ttk.Frame(parent, padding=5, relief="groove", borderwidth=1)
+        frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(frame, text=item['name'], font=("", 10, "bold")).pack(side=tk.LEFT, padx=5)
+        ttk.Label(frame, text=f"({item.get('template', 'No Template')})").pack(side=tk.LEFT, padx=5)
+        
         actions = ttk.Frame(frame)
-        actions.pack(side=tk.RIGHT, padx=10)
-        ttk.Button(actions, text="Run", width=8,
-                   command=lambda f=filename: self.run_shortcut(f)).pack(side=tk.LEFT, padx=2)
-        ttk.Button(actions, text="Edit", width=8,
-                   command=lambda f=filename: self.edit_shortcut(f)).pack(side=tk.LEFT, padx=2)
-        ttk.Button(actions, text="Delete", width=8,
-                   command=lambda f=filename: self.delete_shortcut(f)).pack(side=tk.LEFT, padx=2)
+        actions.pack(side=tk.RIGHT)
+        
+        # Check if running
+        is_running = filename in self.running_processes
+        
+        if is_running:
+            btn = tk.Button(actions, text="Stop", bg="red", fg="white", 
+                            command=lambda f=filename: self.toggle_run(f, path))
+        else:
+            btn = ttk.Button(actions, text="Run", 
+                             command=lambda f=filename: self.toggle_run(f, path))
+        btn.pack(side=tk.LEFT, padx=2)
+        
+        ttk.Button(actions, text="Edit", command=lambda f=filename: self.edit_shortcut(f)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(actions, text="Delete", command=lambda f=filename: self.delete_shortcut(f)).pack(side=tk.LEFT, padx=2)
 
-        
-    def _get_icon_from_desktop(self, desktop_path):
-        if not os.path.exists(desktop_path):
-            return None
+    def toggle_run(self, filename, path):
+        if filename in self.running_processes:
+            # STOP
+            if messagebox.askyesno("Stop", f"Force stop {filename}?"):
+                proc = self.running_processes[filename]
+                try:
+                    import signal
+                    # Kill the process group to ensure children (the actual game) die too
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                except Exception as e:
+                    print(f"Error killing process: {e}")
+                    # Fallback
+                    proc.kill()
+                
+                del self.running_processes[filename]
+                self.list_shortcuts()
+        else:
+            # RUN
+            proc = shortcuts.run_shortcut(path)
+            if proc:
+                self.running_processes[filename] = proc
+                self.list_shortcuts()
+
+    def kill_wine(self):
+        if messagebox.askyesno("Confirm Kill", "This will force kill ALL Wine/Hangover processes running on the system.\n\nAre you sure?"):
+            success, msg = actions.kill_all_wine_processes()
+            messagebox.showinfo("Result", msg)
+
+    def delete_shortcut(self, filename):
+        if messagebox.askyesno("Confirm Delete", f"Are you sure you want to delete '{filename}'?"):
+            shortcuts.delete_shortcut(filename)
+            self.list_shortcuts()
+
+    def list_templates(self):
+        self.clear_main_frame()
+        self.templates = self.controller.get_templates_data()
+
+        header = ttk.Frame(self.main_frame)
+        header.pack(fill=tk.X, pady=5)
+        ttk.Label(header, text="Templates", font=("", 12, "bold")).pack(side=tk.LEFT)
+        ttk.Button(header, text="Add Template", command=self.add_template).pack(side=tk.RIGHT)
+        ttk.Button(header, text="Back", command=self.go_back).pack(side=tk.RIGHT, padx=5)
+
+        # Create scrollable area
+        scroll_frame = self._setup_scrollable_area(self.main_frame)
+
+        for name, data in self.templates.items():
+            frame = ttk.Frame(scroll_frame, padding=5, relief="groove", borderwidth=1)
+            frame.pack(fill=tk.X, pady=5)
+            ttk.Label(frame, text=name, font=("", 10, "bold")).pack(anchor="w")
+            ttk.Label(frame, text=data.get('description', ''), justify=tk.LEFT).pack(anchor="w")
             
-        icon_name = None
-        with open(desktop_path, 'r') as f:
-            for line in f:
-                if line.startswith("Icon="):
-                    icon_name = line.split("=", 1)[1].strip()
-                    break
+            actions = ttk.Frame(frame)
+            actions.pack(side=tk.RIGHT)
+            ttk.Button(actions, text="Edit", command=lambda n=name: self.edit_template(n)).pack(side=tk.LEFT)
+            ttk.Button(actions, text="Delete", command=lambda n=name: self.delete_template(n)).pack(side=tk.LEFT)
+
+    def add_template(self):
+        self._show_template_dialog()
+
+    def edit_template(self, name):
+        self._show_template_dialog(template_name=name)
+
+    def delete_template(self, name):
+        if messagebox.askyesno("Confirm Delete", f"Are you sure you want to delete the template '{name}'?"):
+            templates.delete_template(name)
+            self.list_templates()
+
+    def _show_template_dialog(self, template_name=None):
+        from app import actions # Local import to get updated maps
+
+        is_edit = template_name is not None
+        if is_edit:
+            t_data = self.templates.get(template_name, {})
+        else:
+            # Set default values for new templates
+            t_data = {
+                "runner": "hangover-wine",
+                "env": [
+                    f"WINEPREFIX={Path.home() / '.wine'}",
+                    f"VK_ICD_FILENAMES={actions.VK_MAP['Freedreno']}"
+                ],
+                "description": "Default settings for Hangover+Freedreno", "post_exec": ""
+            }
+
+    def _show_template_dialog(self, template_name=None):
+        from app import actions # Local import to get updated maps
+
+        is_edit = template_name is not None
+        if is_edit:
+            t_data = self.templates.get(template_name, {})
+        else:
+            # Set default values for new templates
+            t_data = {
+                "runner": "hangover-wine",
+                "env": [
+                    f"WINEPREFIX={Path.home() / '.wine'}",
+                    f"VK_ICD_FILENAMES={actions.VK_MAP['Freedreno']}"
+                ],
+                "description": "Default settings for Hangover+Freedreno", "post_exec": ""
+            }
+
+    def _show_template_dialog(self, template_name=None):
+        from app import actions 
+
+        is_edit = template_name is not None
+        if is_edit:
+            t_data = self.templates.get(template_name, {})
+        else:
+            t_data = self.controller.get_template_form_defaults()
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Edit Template" if is_edit else "Create Template")
+        dialog.geometry("600x850")
         
-        if not icon_name:
-            return None
+        # Create scrollable area for the form
+        container = self._setup_scrollable_area(dialog)
         
-        # Verifică dacă este cale absolută
-        if os.path.isabs(icon_name):
-            return icon_name if os.path.exists(icon_name) else None
+        # Dictionary to hold our Tkinter variables
+        self.form_vars = {}
         
-        # Caută în locațiile standard pentru iconițe
-        search_paths = [
-            os.path.join(self.HOME, ".icons"),
-            "/usr/share/pixmaps",
-            "/usr/share/icons",
-            "/usr/local/share/icons"
-        ]
+        # 1. Template Name is special (ID)
+        name_frame = ttk.LabelFrame(container, text="Identity", padding=10)
+        name_frame.pack(fill=tk.X, pady=5, padx=5)
+        ttk.Label(name_frame, text="Template Name:").pack(anchor="w")
+        name_var = tk.StringVar(value=template_name or "")
+        name_entry = ttk.Entry(name_frame, textvariable=name_var, state='disabled' if is_edit else 'normal')
+        name_entry.pack(fill=tk.X)
+        self.form_vars["_id"] = name_var # Internal key for the name
+
+        # 2. Build form from Schema
+        schema = self.controller.get_template_ui_schema()
         
-        for ext in ["", ".png", ".svg", ".xpm", ".ico"]:
-            for path in search_paths:
-                icon_path = os.path.join(path, icon_name + ext)
-                if os.path.exists(icon_path):
-                    return icon_path
+        # Helper for Env vars (needed for the special env_manager block)
+        env_dict = {k: v for k, v in (e.split('=', 1) for e in t_data.get("env", []) if '=' in e)}
+        # Variables specifically for the Env Manager part
+        self.env_special_vars = {} 
+
+        for section in schema:
+            frame = ttk.LabelFrame(container, text=section["section"], padding=10)
+            frame.pack(fill=tk.X, pady=5, padx=5)
+            
+            for field in section["fields"]:
+                key = field["key"]
+                
+                # --- Special Case: Environment Manager ---
+                if field["type"] == "env_manager":
+                    # Re-implementing the complex env logic inside the loop
+                    # WINEPREFIX
+                    ttk.Label(frame, text="WINEPREFIX:").grid(row=0, column=0, sticky="w", pady=2)
+                    prefix_var = tk.StringVar(value=env_dict.get("WINEPREFIX", ""))
                     
-        return None
-        
-        
-    def _extract_exe_icon(self, exe_path, output_path):
-        try:
-            # Pregătim calea de output în PNG
-            png_path = output_path.replace('.ico', '.png')
+                    # Load known prefixes for suggestions
+                    known_prefixes = [p.get('path') for p in config.load_prefixes()]
+                    
+                    ttk.Combobox(frame, textvariable=prefix_var, values=known_prefixes).grid(row=0, column=1, sticky="ew", padx=5)
+                    
+                    def select_prefix(v=prefix_var):
+                        path = filedialog.askdirectory(title="Select WINEPREFIX Folder")
+                        if path: v.set(path)
+                    ttk.Button(frame, text="Browse...", command=select_prefix).grid(row=0, column=2, padx=5)
+                    self.env_special_vars["prefix"] = prefix_var
 
-            # Extragem iconița cu wrestool direct în png_path
-            subprocess.run([
-                "wrestool", "-x", "-t", "14",
-                "-o", png_path,
-                exe_path
-            ], check=True)
+                    # DXVK_HUD
+                    ttk.Label(frame, text="DXVK HUD:").grid(row=1, column=0, sticky="w", pady=2)
+                    dxvk_var = tk.StringVar(value=env_dict.get("DXVK_HUD", "none"))
+                    ttk.Combobox(frame, textvariable=dxvk_var, values=list(actions.DXVK_MAP.keys()), state="readonly").grid(row=1, column=1, sticky="ew", padx=5)
+                    self.env_special_vars["dxvk"] = dxvk_var
 
-            # Convertim la dimensiune standard (dacă ImageMagick e disponibil)
-            if shutil.which("convert"):
-                subprocess.run([
-                    "convert", png_path, "-resize", "32x32", png_path
-                ], check=True)
+                    # Vulkan ICD
+                    ttk.Label(frame, text="Vulkan Driver:").grid(row=2, column=0, sticky="w", pady=2)
+                    current_vk = env_dict.get("VK_ICD_FILENAMES", "")
+                    vk_alias = next((k for k, v in actions.VK_MAP.items() if v == current_vk), "None")
+                    vk_var = tk.StringVar(value=vk_alias)
+                    ttk.Combobox(frame, textvariable=vk_var, values=list(actions.VK_MAP.keys()), state="readonly").grid(row=2, column=1, sticky="ew", padx=5)
+                    self.env_special_vars["vk"] = vk_var
 
-            return os.path.exists(png_path)
-        except Exception as e:
-            print(f"Error extracting icon: {e}")
-            return False
+                    # FEX/EMU
+                    ttk.Label(frame, text="Emulator:").grid(row=3, column=0, sticky="w", pady=2)
+                    current_fex = env_dict.get("HODLL", "")
+                    fex_alias = next((k for k, v in actions.FEX_MAP.items() if v == current_fex), "None")
+                    fex_var = tk.StringVar(value=fex_alias)
+                    ttk.Combobox(frame, textvariable=fex_var, values=list(actions.FEX_MAP.keys()), state="readonly").grid(row=3, column=1, sticky="ew", padx=5)
+                    self.env_special_vars["fex"] = fex_var
+                    
+                    frame.columnconfigure(1, weight=1)
+
+                    # Custom Env Vars Text Area
+                    ttk.Label(frame, text="Custom Environment Variables:").grid(row=4, column=0, sticky="nw", pady=5)
+                    self.custom_env_text = tk.Text(frame, height=4)
+                    self.custom_env_text.grid(row=5, column=0, columnspan=3, sticky="ew")
+                    custom_env_list = [e for e in t_data.get("env", []) if not any(e.startswith(p) for p in ["WINEPREFIX=", "DXVK_HUD=", "VK_ICD_FILENAMES=", "HODLL="])]
+                    self.custom_env_text.insert("1.0", "\n".join(custom_env_list))
+                    
+                # --- Standard Fields ---
+                else:
+                    if field["type"] == "checkbox_mapped":
+                        # Checkbox that maps to specific string values
+                        current_val = str(t_data.get(key, ""))
+                        on_val = field.get("on_value", "true")
+                        off_val = field.get("off_value", "")
+                        
+                        is_checked = (current_val == on_val)
+                        var = tk.BooleanVar(value=is_checked)
+                        
+                        # Store tuple: (variable, type, on_val, off_val) to handle saving logic
+                        self.form_vars[key] = (var, "checkbox_mapped", on_val, off_val)
+                        
+                        ttk.Checkbutton(frame, text=field.get("label", key), variable=var).pack(anchor="w")
+                        
+                    elif field["type"] == "combo":
+                        ttk.Label(frame, text=field.get("label", key)).pack(anchor="w")
+                        val = t_data.get(key, "")
+                        var = tk.StringVar(value=str(val))
+                        self.form_vars[key] = var
+                        ttk.Combobox(frame, textvariable=var, values=field.get("options", []), state="readonly").pack(fill=tk.X)
+                    
+                    else: # text
+                        ttk.Label(frame, text=field.get("label", key)).pack(anchor="w")
+                        val = t_data.get(key, "")
+                        var = tk.StringVar(value=str(val))
+                        self.form_vars[key] = var
+                        ttk.Entry(frame, textvariable=var).pack(fill=tk.X)
+
+        # --- Save / Cancel ---
+        def save_changes():
+            new_name = self.form_vars["_id"].get().strip()
+            if not new_name:
+                messagebox.showerror("Error", "Template name cannot be empty.", parent=dialog)
+                return
             
+            # 1. Collect Standard Fields
+            data_to_save = {}
+            for k, val_data in self.form_vars.items():
+                if k == "_id": continue
+                
+                # Handle our custom types in form_vars
+                if isinstance(val_data, tuple) and len(val_data) == 4 and val_data[1] == "checkbox_mapped":
+                    var, _, on_val, off_val = val_data
+                    data_to_save[k] = on_val if var.get() else off_val
+                elif isinstance(val_data, tk.Variable):
+                    data_to_save[k] = val_data.get().strip()
+                else:
+                    # Fallback for simple vars if any left
+                    data_to_save[k] = val_data.get().strip()
 
-    def run_shortcut(self, filename):
-        shortcuts.run_shortcut(filename)
+            # 2. Collect Environment (Special Logic)
+            prefix = self.env_special_vars["prefix"].get().strip()
+            dxvk = self.env_special_vars["dxvk"].get()
+            vk = self.env_special_vars["vk"].get()
+            fex = self.env_special_vars["fex"].get()
+            custom_vars = [line.strip() for line in self.custom_env_text.get("1.0", tk.END).split('\n') if line.strip()]
+            
+            final_env = actions.assemble_template_env(prefix, dxvk, vk, fex, custom_vars)
+            data_to_save["env"] = final_env
+            
+            success, message = actions.save_template(new_name, data_to_save)
+
+            if success:
+                messagebox.showinfo("Success", message, parent=dialog)
+                dialog.destroy()
+                self.list_templates()
+            else:
+                messagebox.showerror("Error", message, parent=dialog)
+
+        btn_frame = ttk.Frame(container)
+        btn_frame.pack(pady=10)
+        ttk.Button(btn_frame, text="Save", command=save_changes).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
 
     def edit_shortcut(self, filename):
-        desktop_dir = (
-            os.path.join(self.HOME, "Desktop")
-            if os.path.exists(os.path.join(self.HOME, "Desktop"))
-            else self.HOME
-        )
-        desktop_path = os.path.join(desktop_dir, filename)
+        path = Path(os.getenv('XDG_DATA_HOME', Path.home()/'.local'/'share')) / 'applications' / 'shortcuts' / filename
+        details = shortcuts.get_shortcut_details(str(path))
+        
+        if not details:
+            messagebox.showerror("Error", "Could not read shortcut details.")
+            return
+        
+        self.templates = templates.load_templates()
+        template_names = list(self.templates.keys())
 
-        with open(desktop_path, "r", encoding="utf-8") as f:
-            lines = f.read().splitlines()
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Edit {details['name']}")
+        
+        container = ttk.Frame(dialog, padding=10)
+        container.pack(fill=tk.BOTH, expand=True)
 
-        # Safely extract values, providing defaults if they don't exist
-        config = {}
-        for line in lines:
-            if "=" in line:
-                key, value = line.split("=", 1)
-                config[key.strip()] = value.strip()
-
-        display_name = config.get("Name", os.path.splitext(filename)[0])
-        raw_exec_val = config.get("Exec", "")
-        icon_val = config.get("Icon", "application-x-executable")
-        term_val = config.get("Terminal", "true").lower() == "true"
-
-        edit_dialog = tk.Toplevel(self.root)
-        edit_dialog.title(f"Edit {display_name}")
-        edit_dialog.geometry("600x400")
-
-        container = ttk.Frame(edit_dialog)
-        container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        ttk.Label(container, text="Name:").pack(anchor="w")
-        name_var = tk.StringVar(value=display_name)
+        ttk.Label(container, text="Name:").pack()
+        name_var = tk.StringVar(value=details['name'])
         name_entry = ttk.Entry(container, textvariable=name_var)
-        name_entry.pack(fill="x", pady=2)
+        name_entry.pack(fill="x")
 
-        ttk.Label(container, text="Template (pre-run script):").pack(anchor="w", pady=(10, 0))
+        ttk.Label(container, text="Template:").pack()
         template_var = tk.StringVar()
-        templates = os.listdir(self.TEMPLATES_DIR)
-        choices = ["(no template)"] + templates
-        template_combo = ttk.Combobox(container, textvariable=template_var, values=choices, state="readonly")
-        template_combo.pack(fill="x", pady=2)
-
-        match = re.match(r'bash\s+"([^"]+)"', raw_exec_val)
-        if match:
-            template_var.set(os.path.basename(match.group(1)))
-        else:
-
-            template_var.set("(no template)")
-
-        ttk.Label(container, text="Open in Terminal:").pack(anchor="w", pady=(10, 0))
-        term_var = tk.BooleanVar(value=term_val)
-        term_frame = ttk.Frame(container)
-        term_frame.pack(anchor="w")
-        ttk.Radiobutton(term_frame, text="Yes", variable=term_var, value=True).pack(side="left")
-        ttk.Radiobutton(term_frame, text="No", variable=term_var, value=False).pack(side="left")
+        template_combo = ttk.Combobox(container, textvariable=template_var, values=template_names, state="readonly")
+        if details.get('template') in template_names:
+            template_var.set(details['template'])
+        elif template_names:
+            template_var.set(template_names[0])
+        template_combo.pack(fill="x")
 
         def save_changes():
-            new_name = name_var.get().strip() or display_name
-            tpl = template_var.get().strip()
+            new_name = name_var.get().strip() or details['name']
+            tpl_name = template_var.get()
 
-            # Correctly extract the actual executable path
-            quoted_parts = re.findall(r'"([^"]+)"', raw_exec_val)
-            if quoted_parts:
-                # The last quoted part is the executable
-                actual_executable_path = quoted_parts[-1]
-            else:
-                # Fallback for non-quoted paths
-                actual_executable_path = raw_exec_val.split()[-1]
+            python_executable = sys.executable
+            main_script_path = Path(__file__).parent.absolute() / 'app' / 'main.py'
+            new_exec = f'"{python_executable}" "{main_script_path}" --template "{tpl_name}" "{details["executable_path"]}" --wait'
 
-            if tpl and tpl != "(no template)":
-                tpl_path = os.path.join(self.TEMPLATES_DIR, tpl)
-                new_exec = f'bash "{tpl_path}" "{actual_executable_path}"'
-            else:
-                # If no template, just use the executable path
-                new_exec = f'"{actual_executable_path}"'
+            new_details = {
+                'name': details['name'], 'new_name': new_name, 'exec': new_exec,
+                'icon': details['icon'], 'terminal': details['terminal'],
+                'executable_path': details['executable_path'],
+                'desktop_dir': str(Path.home() / "Desktop"),
+                'template': tpl_name
+            }
 
-            new_term = 'true' if term_var.get() else 'false'
-
-            # Rebuild the .desktop file content
-            config["Name"] = new_name
-            config["Exec"] = new_exec
-            config["Terminal"] = new_term
-            config["Icon"] = icon_val # Preserve original icon
-
-            new_content = "[Desktop Entry]\n" + "\n".join([f"{k}={v}" for k, v in config.items() if k != "Type"])
-            
-            with open(desktop_path, "w", encoding="utf-8") as f:
-                f.write(new_content + "\n")
-
-            messagebox.showinfo("Success", "Shortcut updated!")
-            edit_dialog.destroy()
+            shortcuts.update_shortcut(str(path), new_details)
+            dialog.destroy()
             self.list_shortcuts()
 
         btn_frame = ttk.Frame(container)
         btn_frame.pack(pady=10)
-        ttk.Button(btn_frame, text="Save", command=save_changes).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="Cancel", command=edit_dialog.destroy).pack(side="left")
+        ttk.Button(btn_frame, text="Save", command=save_changes).pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT)
 
-    def delete_shortcut(self, filename):
-        shortcuts.delete_shortcut(filename)
-        self.list_shortcuts()
-
-    def add_shortcut(self, preselected_path=None):
-        def ask_string_cb(title, prompt, initial_value=None):
-            return simpledialog.askstring(title, prompt, initialvalue=initial_value)
-
-        def ask_file_cb(title, initial_dir=None, initial_file=None, file_types=None):
-            return filedialog.askopenfilename(title=title, initialdir=initial_dir, initial_file=initial_file, filetypes=file_types)
-
-        def show_warning_cb(title, message):
-            messagebox.showwarning(title, message)
-
-        def show_info_cb(title, message):
-            messagebox.showinfo(title, message)
-
-        def get_templates_cb():
-            return os.listdir(self.TEMPLATES_DIR)
-
-        def select_template_cb(options):
-            dialog = tk.Toplevel(self.root)
-            dialog.title("Choose Template")
-            dialog.geometry("300x150")
-
-            frame = ttk.Frame(dialog, padding=10)
-            frame.pack(fill=tk.BOTH, expand=True)
-
-            ttk.Label(frame, text="Choose template (or none):").pack(anchor="w")
-            template_var = tk.StringVar(value=options[0])
-            cb = ttk.Combobox(frame, textvariable=template_var, values=options, state="readonly")
-            cb.pack(fill="x", pady=5)
-            cb.current(0)
-
-            def on_ok():
-                dialog.destroy()
-
-            btns = ttk.Frame(frame)
-            btns.pack(fill="x", pady=10)
-            ttk.Button(btns, text="OK", command=on_ok).pack(side="right", padx=5)
-            ttk.Button(btns, text="Cancel", command=dialog.destroy).pack(side="right")
-
-            self.root.wait_window(dialog)
-            return template_var.get() if template_var.get() != "" else None
-
-        def extract_exe_icon_cb(exe_path, output_path):
-            return self._extract_exe_icon(exe_path, output_path)
-
-        def refresh_shortcuts_cb():
-            self.list_shortcuts()
-
-        shortcuts.create_shortcut_common(
-            preselected_path,
-            ask_string_cb,
-            ask_file_cb,
-            show_warning_cb,
-            show_info_cb,
-            get_templates_cb,
-            select_template_cb,
-            extract_exe_icon_cb,
-            refresh_shortcuts_cb,
-            self.TEMPLATES_DIR,
-            self.HOME
-        )
-
-    
-    def list_templates(self):
-        self.clear_main_frame()
-
-        header = ttk.Frame(self.main_frame)
-        header.pack(fill=tk.X, pady=5)
-        ttk.Label(header, text="Templates", style="Header.TLabel").pack(side=tk.LEFT)
-        ttk.Button(header, text="Add", command=self.add_template).pack(side=tk.RIGHT)
-        ttk.Button(header, text="Download Templates", command=self.show_available_templates).pack(side=tk.RIGHT, padx=2)
-
-        canvas = tk.Canvas(self.main_frame, bg=self.bg_color, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(self.main_frame, orient="vertical", command=canvas.yview)
-        scrollable_frame = ttk.Frame(canvas)
-
-        scrollable_frame.bind("<Configure>",
-                             lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-
-        templates = os.listdir(self.TEMPLATES_DIR)
-        if not templates:
-            ttk.Label(scrollable_frame, text="No templates available.").pack(pady=10)
-        else:
-            for template in templates:
-                self._create_template_item(scrollable_frame, template)
-
-        back_btn = ttk.Button(self.main_frame, text="Back", command=self.go_back)
-        back_btn.pack(pady=10)
-
-    def _create_template_item(self, parent, name):
-        frame = ttk.Frame(parent, style="Item.TFrame")
-        frame.pack(fill=tk.X, pady=5, padx=5)
-
-        info_frame = ttk.Frame(frame)
-        info_frame.pack(side=tk.LEFT, padx=10)
-
-        ttk.Label(info_frame, text=name, font=("Arial", 12)).pack(anchor="w")
-
-        actions = ttk.Frame(frame)
-        actions.pack(side=tk.RIGHT, padx=10)
-
-        ttk.Button(actions, text="Edit", width=8,
-                  command=lambda: self.edit_template(name)).pack(side=tk.LEFT, padx=2)
-        ttk.Button(actions, text="Delete", width=8,
-                  command=lambda: self.delete_template(name)).pack(side=tk.LEFT, padx=2)
-
-    def edit_template(self, name):
-        path = os.path.join(self.TEMPLATES_DIR, name)
-        try:
-            with open(path, "r") as f:
-                content = f.read()
-            edit_dialog = tk.Toplevel(self.root)
-            edit_dialog.title(f"Edit {name}")
-            edit_dialog.geometry("800x600")
-
-            text_area = tk.Text(edit_dialog, wrap=tk.NONE, undo=True)
-            text_area.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-            text_area.insert(tk.END, content)
-
-            def save_changes():
-                new_content = text_area.get(1.0, tk.END)
-                with open(path, "w") as f:
-                    f.write(new_content.rstrip('\n'))
-                messagebox.showinfo("Success", "Template saved!")
-                edit_dialog.destroy()
-
-            button_frame = ttk.Frame(edit_dialog)
-            button_frame.pack(pady=5)
-            ttk.Button(button_frame, text="Save", command=save_changes).pack(side="left", padx=5)
-            ttk.Button(button_frame, text="Cancel", command=edit_dialog.destroy).pack(side="left")
-
-        except Exception as e:
-            messagebox.showerror("Error", f"Could not read template:\n{str(e)}")
-
-    def delete_template(self, name):
-        templates.delete_template(name)
-        self.list_templates()
-
-    def add_template(self):
-        name = simpledialog.askstring("Template Name", "Enter new template name:")
-        if not name:
+    def add_shortcut(self):
+        self.templates = templates.load_templates()
+        template_names = list(self.templates.keys())
+        if not template_names:
+            messagebox.showerror("Error", "No templates found. Please create a template first.")
             return
 
-        # Load persistent custom actions
-        self.custom_file = os.path.expanduser("~/.template_postrun_custom")
-        if os.path.exists(self.custom_file):
-            with open(self.custom_file) as f:
-                self.persisted_custom_actions = [line.strip() for line in f if line.strip()]
-        else:
-            self.persisted_custom_actions = []
-
-        # Create scrollable dialog
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Create Template")
-        dialog.geometry("800x600")
-        dialog.rowconfigure(0, weight=1)
-        dialog.rowconfigure(1, weight=0)
-        dialog.columnconfigure(0, weight=1)
-
-        # Canvas + scrollbar
-        canvas = tk.Canvas(dialog, bg=self.bg_color, highlightthickness=0)
-        vsb = ttk.Scrollbar(dialog, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=vsb.set)
-        canvas.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
-
-        # Scrollable frame
-        scrollable = ttk.Frame(canvas)
-        scrollable.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0,0), window=scrollable, anchor="nw")
-
-        # Title
-        ttk.Label(scrollable, text="Choose options and then save").pack(pady=10)
-
-        # Runner
-        runner_var = tk.StringVar()
-        ttk.Label(scrollable, text="Runner:").pack(anchor="w", padx=10)
-        runner_combo = ttk.Combobox(scrollable, textvariable=runner_var, values=self._get_runners())
-        runner_combo.pack(fill="x", padx=10, pady=5)
-        runner_combo.current(0)
-
-        # Parallel execution
-        parallel_var = tk.BooleanVar()
-        ttk.Checkbutton(scrollable, text="Run in parallel (&)", variable=parallel_var).pack(anchor="w", padx=10)
-
-        # EMU
-        emu_var = tk.StringVar()
-        ttk.Label(scrollable, text="EMU Settings:").pack(anchor="w", padx=10)
-        emu_combo = ttk.Combobox(scrollable, textvariable=emu_var, values=["libwow64fex.dll"])
-        emu_combo.pack(fill="x", padx=10, pady=5)
-        emu_combo.current(0)
-
-        # WINEPREFIX
-        wine_var = tk.StringVar()
-        ttk.Label(scrollable, text="WINEPREFIX:").pack(anchor="w", padx=10)
-        wine_combo = ttk.Combobox(scrollable, textvariable=wine_var, values=["~/.wine", "~/.proton"])
-        wine_combo.pack(fill="x", padx=10, pady=5)
-        wine_combo.current(0)
-
-        # DXVK HUD
-        dxvk_var = tk.StringVar()
-        ttk.Label(scrollable, text="DXVK HUD:").pack(anchor="w", padx=10)
-        dxvk_combo = ttk.Combobox(scrollable, textvariable=dxvk_var, values=["none", "1", "full"])
-        dxvk_combo.pack(fill="x", padx=10, pady=5)
-        dxvk_combo.current(0)
-
-        # Vulkan ICD
-        vk_var = tk.StringVar()
-        ttk.Label(scrollable, text="Vulkan ICD:").pack(anchor="w", padx=10)
-        vk_combo = ttk.Combobox(scrollable, textvariable=vk_var, values=[
-            "$PREFIX/share/vulkan/icd.d/wrapper_icd.aarch64.json",
-            "$PREFIX/share/vulkan/icd.d/freedreno_icd.aarch64.json"
-        ])
-        vk_combo.pack(fill="x", padx=10, pady=5)
-        vk_combo.current(0)
-
-        # Post-exec
-        ttk.Label(scrollable, text="Post-execution actions:").pack(anchor="w", padx=10)
-        after_vars = []
-        after_frame = ttk.Frame(scrollable)
-        after_frame.pack(fill="x", padx=10, pady=5)
-
-        def refresh_after_list():
-            for w in after_frame.winfo_children():
-                w.destroy()
-            after_vars.clear()
-
-            available = [
-                "echo 'Execution finished'",
-                "notify-send 'Template finished'",
-                "rm -f *.tmp",
-                "sync; echo 'Data synchronized'",
-                "poweroff",
-                "pkill -9 -f services.exe"
-            ] + self.persisted_custom_actions
-
-            for opt in available:
-                var = tk.BooleanVar()
-                after_vars.append((opt, var))
-                row = ttk.Frame(after_frame)
-                row.pack(fill="x", pady=2)
-                ttk.Checkbutton(row, text=opt, variable=var).pack(side="left", fill="x", expand=True)
-                if opt in self.persisted_custom_actions:
-                    ttk.Button(row, text="✖", width=2, command=lambda o=opt: delete_after(o)).pack(side="right")
-
-        def delete_after(opt):
-            if opt in self.persisted_custom_actions:
-                self.persisted_custom_actions.remove(opt)
-                with open(self.custom_file, "w") as f:
-                    f.write("\n".join(self.persisted_custom_actions))
-            refresh_after_list()
-
-        def add_custom_post_exec():
-            custom = simpledialog.askstring("Add action", "Enter a custom post-execution action:")
-            if custom and custom not in self.persisted_custom_actions:
-                self.persisted_custom_actions.append(custom)
-                with open(self.custom_file, "a") as f:
-                    f.write(custom + "\n")
-            refresh_after_list()
-
-        refresh_after_list()
-        ttk.Button(scrollable, text="Add custom action ⨁", command=add_custom_post_exec).pack(anchor="w", padx=10, pady=5)
-
-        # Preview area
-        ttk.Label(scrollable, text="Script Preview:").pack(anchor="w", padx=10, pady=(10,0))
-        self.code_preview = tk.Text(scrollable, height=15, wrap="none",
-                                    bg=self.bg_color, fg=self.fg_color,
-                                    insertbackground=self.fg_color)
-        self.code_preview.pack(fill="both", expand=True, padx=10, pady=5)
-
-        def update_preview(*_):
-            runner = runner_combo.get()
-            wine = wine_combo.get()
-            dxvk = dxvk_combo.get()
-            vk = vk_combo.get()
-            emu = emu_combo.get()
-            parallel = "&" if parallel_var.get() else ""
-            after_lines = [opt for opt, var in after_vars if var.get()]
-
-            lines = [
-                "#!/bin/sh", "", "# === Exports ===",
-                f"\texport WINEPREFIX={wine}",
-                (f"\texport DXVK_HUD={dxvk}" if dxvk!="none" else ""),
-                (f"\texport VK_ICD_FILENAMES={vk}" if vk else ""),
-                (f"\texport HODLL={emu}" if emu else ""),
-                "", "# === Script Directory ===",
-                '\tcd "$(dirname "$1")"', "", "# === Main Run ===",
-                f'\t{runner} "$1"{parallel}', "", "# === Post-execution ===",
-                *[f"\t{cmd}" for cmd in after_lines]
-            ]
-
-            self.code_preview.config(state='normal')
-            self.code_preview.delete("1.0", tk.END)
-            self.code_preview.insert(tk.END, "\n".join([l for l in lines if l]))
-            self.code_preview.config(state='disabled')
-
-        def save_template():
-            runner = runner_combo.get()
-            wine = wine_combo.get()
-            dxvk = dxvk_combo.get()
-            vk = vk_combo.get()
-            emu = emu_combo.get()
-            parallel = "&" if parallel_var.get() else ""
-            after_lines = [opt for opt,var in after_vars if var.get()]
-            custom_lines = []
-
-            lines = [
-                "#!/bin/sh",
-                "",
-                "# === Exports ===",
-                f"\texport WINEPREFIX={wine}",
-                f"\texport DXVK_HUD={dxvk}" if dxvk != "none" else "",
-                f"\texport VK_ICD_FILENAMES={vk}" if vk else "",
-                f"\texport HODLL={emu}" if emu else "",
-                "",
-                "# === Script Directory ===",
-                '\tcd "$(dirname "$1")"',
-                "",
-                "# === Main Run ===",
-                f'\t{runner} "$1"{parallel}',
-                "",
-                "# === Post-execution ===",
-                *[f"\t{text}" for text in after_lines + custom_lines]
-            ]
-
-            content = '\n'.join([line for line in lines if line])
-
-            template_path = os.path.join(self.TEMPLATES_DIR, name)
-            try:
-                with open(template_path, "w") as f:
-                    f.write(content)
-                os.chmod(template_path, 0o755)
-                messagebox.showinfo("Success", f"Template saved: {template_path}")
-                dialog.destroy()
-            except Exception as e:
-                messagebox.showerror("Error", f"Could not save template:\n{str(e)}")
-
-        # Fixed button bar
-        btn_frame = ttk.Frame(dialog)
-        btn_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=5)
-        ttk.Button(btn_frame, text="Save Template", command=save_template).pack(side="left", padx=5)
-        ttk.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side="left")
-
-        # Legări preview
-        runner_combo.bind("<<ComboboxSelected>>", update_preview)
-        parallel_var.trace_add("write", lambda *_: update_preview())
-        emu_combo.bind("<<ComboboxSelected>>", update_preview)
-        wine_combo.bind("<<ComboboxSelected>>", update_preview)
-        dxvk_combo.bind("<<ComboboxSelected>>", update_preview)
-        vk_combo.bind("<<ComboboxSelected>>", update_preview)
-        for _, var in after_vars:
-            var.trace_add("write", lambda *_: update_preview())
-
-        update_preview()
-
-
+        tpl_dialog = tk.Toplevel(self.root)
+        tpl_dialog.title("Choose Template")
+        tpl_var = tk.StringVar()
+        ttk.Label(tpl_dialog, text="Select a template:").pack(padx=10, pady=10)
+        combo = ttk.Combobox(tpl_dialog, textvariable=tpl_var, values=template_names, state="readonly")
+        if template_names:
+            combo.current(0)
+        combo.pack(padx=10, pady=5)
         
+        chosen_tpl = None
+        def on_ok():
+            nonlocal chosen_tpl
+            chosen_tpl = tpl_var.get()
+            tpl_dialog.destroy()
+        
+        ttk.Button(tpl_dialog, text="OK", command=on_ok).pack(pady=10)
+        self.root.wait_window(tpl_dialog)
+
+        if not chosen_tpl:
+            return
+
+        shortcuts.create_shortcut_common(
+            preselected_path=None,
+            ask_string_cb=lambda t,p,i=None: simpledialog.askstring(t,p,initialvalue=i),
+            ask_file_cb=lambda t: filedialog.askopenfilename(title=t),
+            show_warning_cb=messagebox.showwarning,
+            show_info_cb=messagebox.showinfo,
+            extract_exe_icon_cb=lambda e,o: True, # Placeholder
+            refresh_shortcuts_cb=self.list_shortcuts,
+            HOME=self.HOME,
+            template_name=chosen_tpl
+        )
+
     def manage_prefixes(self):
         self.clear_main_frame()
         header = ttk.Frame(self.main_frame)
         header.pack(fill=tk.X, pady=5)
-        ttk.Label(header, text="Manage Wine Prefixes", style="Header.TLabel").pack(side=tk.LEFT)
+        ttk.Label(header, text="Manage Wine Prefixes", font=("", 12, "bold")).pack(side=tk.LEFT)
         ttk.Button(header, text="Create New Prefix", command=self.create_prefix).pack(side=tk.RIGHT)
+        ttk.Button(header, text="Back", command=self.go_back).pack(side=tk.RIGHT, padx=5)
 
-        canvas = tk.Canvas(self.main_frame, bg=self.bg_color, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(self.main_frame, orient="vertical", command=canvas.yview)
-        scrollable_frame = ttk.Frame(canvas)
-        scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
+        # Create scrollable area
+        scroll_frame = self._setup_scrollable_area(self.main_frame)
 
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-
-        prefixes = self.load_prefixes()
+        prefixes = self.controller.get_prefixes_data()
         if not prefixes:
-            ttk.Label(scrollable_frame, text="No prefixes available.").pack(pady=10)
+            ttk.Label(scroll_frame, text="No prefixes configured.").pack(pady=20)
         else:
             for p in prefixes:
-                self._create_prefix_item(scrollable_frame, p)
+                self._create_prefix_item(scroll_frame, p)
 
-        ttk.Button(self.main_frame, text="Back", command=self.go_back).pack(pady=10)
+    def _create_prefix_item(self, parent, item):
+        name = item.get('name', 'Unknown')
+        path = item.get('path', '?')
+        
+        frame = ttk.Frame(parent, padding=5, relief="groove", borderwidth=1)
+        frame.pack(fill=tk.X, pady=5, padx=5)
+        ttk.Label(frame, text=f"{name} ({path})").pack(side=tk.LEFT, padx=5)
+        
+        actions = ttk.Frame(frame)
+        actions.pack(side=tk.RIGHT)
+        ttk.Button(actions, text="Edit", command=lambda p=item: self.edit_prefix(p)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(actions, text="Delete", command=lambda p=item: self.delete_prefix(p)).pack(side=tk.LEFT, padx=2)
+
+    def delete_prefix(self, prefix_data):
+        name = prefix_data.get('name', '?')
+        path = prefix_data.get('path', '?')
+        if messagebox.askyesno("Confirm Delete", f"Are you sure you want to remove the prefix '{name}' from the list? This will not delete the folder."):
+            prefixes = self.load_prefixes()
+            # Remove by path match
+            prefixes = [p for p in prefixes if p.get('path') != path]
+            self.save_prefixes(prefixes)
+            self.manage_prefixes()
 
     def create_prefix(self):
-        runners = self._get_runners()
-        if not runners:
-            messagebox.showerror("Error", "No runners detected!")
-            return
-
         dialog = tk.Toplevel(self.root)
-        dialog.title("Create New Prefix")
-        dialog.geometry("420x240")
+        dialog.title("Create/Add Wine Prefix")
+        dialog.geometry("400x350")
         
+        container = ttk.Frame(dialog, padding=10)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        # Name
+        ttk.Label(container, text="Name:").pack(anchor="w")
+        name_var = tk.StringVar()
+        ttk.Entry(container, textvariable=name_var).pack(fill=tk.X, pady=(0, 10))
+
+        # Runner
+        ttk.Label(container, text="Runner:").pack(anchor="w")
+        runner_var = tk.StringVar(value="wine")
+        # Attempt to get runners list if available, or just a text entry
         runners = self._get_runners()
-        template_files = [f"[TEMPLATE] {f}" for f in os.listdir(self.TEMPLATES_DIR) if os.path.isfile(os.path.join(self.TEMPLATES_DIR, f))]
-        combined_options = runners + template_files
-
-        ttk.Label(dialog, text="Runner or Template:", style="Section.TLabel").pack(pady=8)
-        runner_var = tk.StringVar(value=combined_options[0])
-        runner_combo = ttk.Combobox(dialog, textvariable=runner_var, values=combined_options, state="readonly")
-        runner_combo.pack(pady=4)
-        runner_combo.current(0)
-
-        ttk.Label(dialog, text="Architecture:", style="Section.TLabel").pack(pady=8)
-        arch_var = tk.StringVar(value="win64")
-        arch_entry = ttk.Combobox(dialog, textvariable=arch_var, values=["win32", "win64"], state="readonly")
-        arch_entry.pack(pady=4)
-        arch_entry.current(1)
-
-        # --- Checkpoint for registry import ---
-        reg_path = os.path.join(self.HOME, "registry")
-        do_import = tk.BooleanVar(value=False)
-        if os.path.isfile(reg_path):
-            ttk.Checkbutton(dialog, text=f"Import {reg_path} after initialization", variable=do_import).pack(pady=10)
+        if runners:
+             runner_combo = ttk.Combobox(container, textvariable=runner_var, values=runners)
+             runner_combo.pack(fill=tk.X, pady=(0, 10))
+             if runners: runner_combo.current(0)
         else:
-            reg_path = None  # does not exist, do not display anything
+             ttk.Entry(container, textvariable=runner_var).pack(fill=tk.X, pady=(0, 10))
 
-        def create():
-            dialog.destroy()
-            new_prefix = filedialog.askdirectory(title="Choose folder for new prefix")
-            if not new_prefix:
+        # Architecture
+        ttk.Label(container, text="Architecture:").pack(anchor="w")
+        arch_var = tk.StringVar(value="win64")
+        ttk.Combobox(container, textvariable=arch_var, values=["win64", "win32"], state="readonly").pack(fill=tk.X, pady=(0, 10))
+
+        def do_create():
+            name = name_var.get().strip()
+            if not name:
+                messagebox.showerror("Error", "Name is required for new prefix.")
                 return
-            selected = runner_var.get()
-            env = os.environ.copy()
-            cmd = []
 
+            base_dir = Path.home() / ".local/share/barrel/prefixes"
+            base_dir.mkdir(parents=True, exist_ok=True)
+            prefix_path = str(base_dir / name)
+            
+            _finalize(name, prefix_path, True)
+
+        def do_browse():
+            path = filedialog.askdirectory(title="Choose prefix folder")
+            if not path: return
+            
+            name = name_var.get().strip()
+            if not name:
+                name = os.path.basename(path)
+            
+            _finalize(name, path, False) # False = don't force create, just init if needed? Or just add.
+            
+        def _finalize(name, path, create_mode):
+            runner = runner_var.get()
+            arch = arch_var.get()
+            
             try:
-                if not os.path.exists(new_prefix):
-                    os.makedirs(new_prefix)
-
-                if selected.startswith("[TEMPLATE] "):
-                    template_name = selected.replace("[TEMPLATE] ", "")
-                    template_path = os.path.join(self.TEMPLATES_DIR, template_name)
-                    cmd = ["bash", template_path, "wineboot"]
-                else:
-                    runner = selected
-                    cmd = [runner, "wineboot"]
-                    env["WINEPREFIX"] = new_prefix
-                    if arch_var.get() == "win32":
-                        env["WINEARCH"] = "win32"
-                    elif "WINEARCH" in env:
-                        del env["WINEARCH"]
-
-                subprocess.run(cmd, env=env, check=True)
-
-                # Save prefix
+                env = os.environ.copy()
+                env["WINEPREFIX"] = path
+                env["WINEARCH"] = arch
+                
+                # If create mode, run wineboot. If browse, maybe user wants to init it too? 
+                # Let's assume wineboot is safe to run on existing prefix (it updates it).
+                subprocess.run([runner, "wineboot"], env=env, check=True)
+                
                 prefixes = self.load_prefixes()
-                if new_prefix not in prefixes:
-                    prefixes.append(new_prefix)
-                    self.save_prefixes(prefixes)
-
-                messagebox.showinfo("Success", f"Prefix created successfully!\nCommand:\n{' '.join(cmd)}")
+                # Check for duplicate paths or names? For now just append.
+                # Remove if exists to update
+                prefixes = [p for p in prefixes if p.get('path') != path and p.get('name') != name]
+                
+                prefixes.append({"name": name, "path": path, "runner": runner})
+                self.save_prefixes(prefixes)
+                
+                messagebox.showinfo("Success", f"Prefix '{name}' ready!")
+                dialog.destroy()
                 self.manage_prefixes()
             except Exception as e:
-                messagebox.showerror("Error", f"Error creating prefix:\n{str(e)}")
+                messagebox.showerror("Error", f"Failed to setup prefix: {e}")
 
-        ttk.Button(dialog, text="Create Prefix", command=create).pack(pady=15)
-        ttk.Button(dialog, text="Cancel", command=dialog.destroy).pack()
+        btn_frame = ttk.Frame(container)
+        btn_frame.pack(pady=10)
+        ttk.Button(btn_frame, text="Create New (Auto)", command=do_create).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Add Existing (Browse)", command=do_browse).pack(side=tk.LEFT, padx=5)
 
+
+    def edit_prefix(self, prefix_data):
+        prefix_path = prefix_data['path']
+        prefix_name = prefix_data.get('name', 'Unknown')
+        current_runner = prefix_data.get('runner', 'wine')
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"Edit Prefix: {prefix_name}")
+        dialog.geometry("400x350")
+
+        container = ttk.Frame(dialog, padding=10)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(container, text=f"{prefix_name}\n{prefix_path}", wraplength=380).pack(pady=5)
+        
+        # Runner Selector
+        ttk.Label(container, text="Default Runner:").pack(anchor="w", pady=(10,0))
+        runner_var = tk.StringVar(value=current_runner)
+        runners = self._get_runners()
+        if not runners: runners = ["wine"]
+        
+        runner_combo = ttk.Combobox(container, textvariable=runner_var, values=runners, state="readonly")
+        runner_combo.pack(fill=tk.X, pady=5)
+        
+        def on_runner_change(event):
+            new_r = runner_var.get()
+            # Update data
+            prefix_data['runner'] = new_r
+            # Update storage
+            prefixes = self.load_prefixes()
+            for p in prefixes:
+                if p['path'] == prefix_path:
+                    p['runner'] = new_r
+            self.save_prefixes(prefixes)
             
-    def _create_prefix_item(self, parent, path):
-        frame = ttk.Frame(parent, style="Item.TFrame")
-        frame.pack(fill=tk.X, pady=5, padx=5)
+        runner_combo.bind("<<ComboboxSelected>>", on_runner_change)
 
-        ttk.Label(frame, text=path, font=("Arial", 11)).pack(side=tk.LEFT, padx=5)
+        ttk.Button(container, text="Run Winetricks", command=lambda: self.run_winetricks(prefix_path, runner_var.get())).pack(fill=tk.X, pady=5)
+        ttk.Button(container, text="Run Winecfg", command=lambda: self.run_winecfg(prefix_path, runner_var.get())).pack(fill=tk.X, pady=5)
+        ttk.Button(container, text="Install DXVK (GPLAsync)", command=lambda: self.install_dxvk(prefix_path)).pack(fill=tk.X, pady=5)
+        ttk.Button(container, text="Close", command=dialog.destroy).pack(pady=10)
 
-        actions = ttk.Frame(frame)
-        actions.pack(side=tk.RIGHT, padx=5)
-        ttk.Button(actions, text="Edit", command=lambda: self.edit_prefix(path)).pack(side=tk.LEFT)
-        ttk.Button(actions, text="Delete", command=lambda: self.delete_prefix(path)).pack(side=tk.LEFT, padx=3)
+    def run_winetricks(self, prefix_path, runner="wine"):
+        try:
+            env = os.environ.copy()
+            env["WINEPREFIX"] = prefix_path
+            # Optional: if runner is special, we might want to set WINE env var
+            # env["WINE"] = runner 
+            subprocess.Popen(["winetricks"], env=env)
+        except FileNotFoundError:
+            messagebox.showerror("Error", "Winetricks is not installed or not in your PATH.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to run Winetricks: {e}")
 
-    def edit_prefix(self, prefix_path):
-        edit_dialog = tk.Toplevel(self.root)
-        edit_dialog.title("Edit Prefix")
-        edit_dialog.geometry("420x440")
-        ttk.Label(edit_dialog, text=f"Prefix: {prefix_path}", style="Section.TLabel").pack(pady=8)
+    def run_winecfg(self, prefix_path, runner="wine"):
+        try:
+            env = os.environ.copy()
+            env["WINEPREFIX"] = prefix_path
+            subprocess.Popen([runner, "winecfg"], env=env)
+        except FileNotFoundError:
+            messagebox.showerror("Error", f"Runner '{runner}' not found.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to run Winecfg: {e}")
 
-        # Selectable runner
-        runner_var = tk.StringVar(value="wine")
-        ttk.Label(edit_dialog, text="Runner:").pack()
-        runner_combo = ttk.Combobox(edit_dialog, textvariable=runner_var, values=self._get_runners())
-        runner_combo.pack(pady=4)
-        if runner_combo["values"]:
-            runner_combo.current(0)
+    def install_dxvk(self, prefix_path):
+        def show_error(t, m): messagebox.showerror(t, m)
+        def show_info(t, m): messagebox.showinfo(t, m)
+        
+        def select_version_cb(options):
+            if not options:
+                show_error("Error", "No DXVK versions found.")
+                return None
 
-        # Quick Winetricks
-        runner = runner_var.get() 
-        def run_tricks():
-            subprocess.run(["winetricks"], env={"WINEPREFIX": prefix_path, "WINE": runner,**os.environ}, check=True)
-
-        ttk.Button(edit_dialog, text="Run Winetricks", command=run_tricks).pack(pady=8)
-        ttk.Button(edit_dialog, text="Install DXVK GPLAsync", command=lambda: self.install_dxvk_gplasync(prefix_path)).pack(pady=8)
-
-        # Run custom script
-        def run_script_custom():
-            script = filedialog.askopenfilename(title="Choose script to run")
-            if script:
-                try:
-                    subprocess.run([runner_var.get(), script], env={"WINEPREFIX": prefix_path, **os.environ})
-                    messagebox.showinfo("Script", "Script run successfully!")
-                except Exception as e:
-                    messagebox.showerror("Error", f"Script error:\n{str(e)}")
-
-        ttk.Button(edit_dialog, text="Run Custom Script", command=run_script_custom).pack(pady=8)
-        # === Dropdown import .reg ===
-        reg_dir = os.path.join(self.HOME, "registry")
-        reg_files = []
-        if os.path.isdir(reg_dir):
-            reg_files = glob.glob(os.path.join(reg_dir, "*.reg"))
-        reg_file_names = [os.path.basename(f) for f in reg_files]
-
-        selected_reg = tk.StringVar(value=reg_file_names[0] if reg_file_names else "")
-
-        if reg_file_names:
-            ttk.Label(edit_dialog, text="Choose .reg file to import:", style="Section.TLabel").pack(pady=8)
-            reg_combo = ttk.Combobox(edit_dialog, textvariable=selected_reg, values=reg_file_names, state="readonly")
-            reg_combo.pack(pady=4)
+            dialog = tk.Toplevel(self.root)
+            dialog.title("Select DXVK Version")
             
-            def import_registry():
-                if not selected_reg.get():
-                    messagebox.showerror("Error", "No .reg file selected!")
-                    return
-                reg_path = os.path.join(reg_dir, selected_reg.get())
-                try:
-                    subprocess.run([runner_var.get(), "regedit", reg_path], env={"WINEPREFIX": prefix_path, **os.environ}, check=True)
-                    messagebox.showinfo("Success", f"Registry imported: {selected_reg.get()}")
-                except Exception as e:
-                    messagebox.showerror("Error", f"Error importing registry:\n{str(e)}")
+            container = ttk.Frame(dialog, padding=10)
+            container.pack(fill=tk.BOTH, expand=True)
+
+            ttk.Label(container, text="Please select a DXVK version to install:").pack(pady=5)
             
-            ttk.Button(edit_dialog, text="Import Registry", command=import_registry).pack(pady=8)
-        else:
-            ttk.Label(edit_dialog, text="No .reg files in ~/registry").pack(pady=8)
+            version_var = tk.StringVar(value=options[0])
+            combo = ttk.Combobox(container, textvariable=version_var, values=options, state="readonly")
+            combo.pack(fill=tk.X, pady=5)
+            
+            chosen_version = None
+            def on_ok():
+                nonlocal chosen_version
+                chosen_version = version_var.get()
+                dialog.destroy()
 
-        ttk.Button(edit_dialog, text="Close", command=edit_dialog.destroy).pack(pady=12)
+            ttk.Button(container, text="Install", command=on_ok).pack(pady=10)
+            self.root.wait_window(dialog)
+            return chosen_version
 
+        installers.install_dxvk_gplasync(show_error, show_info, select_version_cb, prefix_path)
 
     def load_prefixes(self):
         return config.load_prefixes()
 
     def save_prefixes(self, prefixes):
         config.save_prefixes(prefixes)
-            
 
-
-    def install_dxvk_gplasync(self, prefix_path):
-        def show_error_cb(title, message):
-            messagebox.showerror(title, message)
-
-        def show_info_cb(title, message):
-            messagebox.showinfo(title, message)
-
-        def select_version_cb(options):
-            vers_var = tk.StringVar(value=options[0])
-            vers_dialog = tk.Toplevel(self.root)
-            vers_dialog.title("Choose DXVK GPLAsync version")
-            ttk.Label(vers_dialog, text="Choose DXVK GPLAsync version:").pack(pady=10)
-            vers_combo = ttk.Combobox(vers_dialog, textvariable=vers_var, values=options, state="readonly")
-            vers_combo.pack(pady=10, padx=10)
-            ttk.Button(vers_dialog, text="OK", command=vers_dialog.destroy).pack(pady=10)
-            self.root.wait_window(vers_dialog)
-            return vers_var.get()
-
-        installers.install_dxvk_gplasync(show_error_cb, show_info_cb, select_version_cb, prefix_path)
 
     def _get_runners(self):
-        """Detect available runners"""
-        runners = []
-        for bin_name in ["wine", "proton-run.sh", "hangover-wine", "hangover-run.sh" "bash", "wine-stable", "proton-wine", "proton-box", "box64", "box86", "box32"]:
-            if shutil.which(bin_name):
-                runners.append(bin_name)
-        return runners or ["wine", "bash"]
-
-    # ===================================================================
-    # Funcții pentru descărcare și actualizare
-    # ===================================================================
-    
-    def show_available_templates(self):
-        """Display available templates for download"""
-        try:
-            # Get latest release
-            releases = self._get_github_releases("moio9", "default")
-            if not releases:
-                messagebox.showinfo("Information", "No releases found.")
-                return
-            
-            latest_release = releases[0]
-            assets = latest_release.get('assets', [])
-            
-            # Filter only assets containing "template" or with specific extensions
-            template_assets = [a for a in assets if 
-                             'template' in a['name'].lower() or 
-                             a['name'].endswith(('.sh', '.py', 'tmp'))]
-            
-            if not template_assets:
-                messagebox.showinfo("Information", "No templates found in this release.")
-                return
-            
-            # Create dialog
-            dialog = tk.Toplevel(self.root)
-            dialog.title("Available Templates")
-            dialog.geometry("600x400")
-            
-            # Main frame
-            main_frame = ttk.Frame(dialog)
-            main_frame.pack(fill="both", expand=True, padx=10, pady=10)
-            
-            # Title
-            ttk.Label(main_frame, text="Select templates to download:", 
-                     style="Section.TLabel").pack(anchor="w", pady=5)
-            
-            # Frame for list with scroll
-            list_frame = ttk.Frame(main_frame)
-            list_frame.pack(fill="both", expand=True)
-            
-            # Scrollbar
-            scrollbar = ttk.Scrollbar(list_frame)
-            scrollbar.pack(side="right", fill="y")
-            
-            # Listbox for templates
-            listbox = tk.Listbox(
-                list_frame, 
-                selectmode=tk.MULTIPLE,
-                yscrollcommand=scrollbar.set,
-                width=60,
-                height=15
-            )
-            listbox.pack(side="left", fill="both", expand=True)
-            scrollbar.config(command=listbox.yview)
-            
-            # Add templates to list
-            for asset in template_assets:
-                # Check if template already exists locally
-                local_path = os.path.join(self.TEMPLATES_DIR, asset['name'])
-                exists = os.path.exists(local_path)
-                status = " (already exists)" if exists else ""
-                listbox.insert(tk.END, f"{asset['name']}{status}")
-            
-            # Download button
-            def download_selected():
-                selected_indices = listbox.curselection()
-                if not selected_indices:
-                    messagebox.showwarning("Attention", "No template selected!")
-                    return
-                
-                overwrite = messagebox.askyesno(
-                    "Overwrite", 
-                    "Do you want to overwrite existing templates?",
-                    parent=dialog
-                )
-                
-                for index in selected_indices:
-                    asset = template_assets[index]
-                    self._download_template(asset, overwrite)
-                
-                dialog.destroy()
-                self.list_templates()  # Refresh list
-            
-            btn_frame = ttk.Frame(main_frame)
-            btn_frame.pack(pady=10)
-            
-            ttk.Button(btn_frame, text="Download Selected", 
-                      command=download_selected).pack(side="left", padx=5)
-            ttk.Button(btn_frame, text="Close", 
-                      command=dialog.destroy).pack(side="left", padx=5)
-            
-        except Exception as e:
-            messagebox.showerror("Error", f"Could not get templates:\n{str(e)}")
-
-    def _download_template(self, asset, overwrite=False):
-        """Download an individual template"""
-        try:
-            save_path = os.path.join(self.TEMPLATES_DIR, asset['name'])
-            
-            # Check if file already exists
-            if os.path.exists(save_path) and not overwrite:
-                messagebox.showinfo("Skipped", f"Template {asset['name']} already exists and was not overwritten.")
-                return False
-            
-            # Download asset
-            response = requests.get(asset['browser_download_url'], stream=True)
-            response.raise_for_status()
-            
-            with open(save_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            
-            # Set execute permissions for .sh files
-            if asset['name'].endswith('.sh'):
-                os.chmod(save_path, 0o755)
-            
-            messagebox.showinfo("Success", f"Template downloaded: {asset['name']}")
-            return True
-        except Exception as e:
-            messagebox.showerror("Error", f"Error downloading {asset['name']}:\n{str(e)}")
-            return False
-
-    def _get_github_releases(self, owner, repo, tag=None):
-        return updater.get_github_releases(owner, repo, tag)
+        """Detects available runners from a predefined list."""
+        return self.controller.get_available_runners()
 
     def show_about(self):
-        """Display 'About' dialog"""
-        about_dialog = tk.Toplevel(self.root)
-        about_dialog.title(f"About {__app_name__}")
-        about_dialog.geometry("400x300")
-        
-        ttk.Label(about_dialog, text=f"{__app_name__} {__version__}", 
-                 font=("Arial", 14, "bold")).pack(pady=10)
-        
-        ttk.Label(about_dialog, text="Launcher for creating and managing shortcuts and templates", 
-                 justify="center").pack(pady=10)
-        
-        ttk.Label(about_dialog, text="Repository:", font=("Arial", 10)).pack(pady=5)
-        
-        # Button for opening repository
-        repo_frame = ttk.Frame(about_dialog)
-        repo_frame.pack(pady=5)
-        
-        def open_template_repo():
-            webbrowser.open(self.TEMPLATE_RELEASES)
-            
-        ttk.Button(repo_frame, text="Templates", 
-                  command=open_template_repo).pack(side=tk.LEFT, padx=5)
-        
-        def open_app_repo():
-            webbrowser.open(self.APP_RELEASES)
-            
-        ttk.Button(repo_frame, text="Application", 
-                  command=open_app_repo).pack(side=tk.LEFT, padx=5)
-        
-        # Close button
-        ttk.Button(about_dialog, text="Close", 
-                  command=about_dialog.destroy).pack(pady=15)
-
-    def check_app_update(self):
-        """Check for new application version"""
-        try:
-            # Get latest release
-            releases = self._get_github_releases("moio9", "default")
-            if not releases:
-                messagebox.showinfo("Update", "No releases found.")
-                return
-            
-            latest_release = releases[0]
-            latest_version = latest_release['tag_name']
-            
-            # Compare versions
-            if self._is_newer_version(latest_version, __version__):
-                # Find main asset (assume it's .py or has repo name)
-                app_asset = None
-                for asset in latest_release.get('assets', []):
-                    if 'shortcut' in asset['name'].lower() or asset['name'].endswith(('.py', 'txt', 'ver', 'v', '')):
-                        app_asset = asset
-                        break
-                
-                if not app_asset:
-                    messagebox.showerror("Error", "Application file not found in release!")
-                    return
-                    
-                    # Download new version
-                    temp_dir = tempfile.mkdtemp()
-                    download_path = os.path.join(temp_dir, app_asset['name'])
-                    
-                    try:
-                        response = requests.get(app_asset['browser_download_url'], stream=True)
-                        response.raise_for_status()
-                        
-                        with open(download_path, 'wb') as f:
-                            for chunk in response.iter_content(chunk_size=8192):
-                                f.write(chunk)
-                        
-                        # Open folder with downloaded file
-                        subprocess.Popen(['xdg-open', temp_dir])
-                        messagebox.showinfo(
-                            "Download complete",
-                            f"New version downloaded to:\n{download_path}\n\n"
-                            "Please manually replace the old file with the new one.",
-                            parent=self.root
-                        )
-                    except Exception as e:
-                        messagebox.showerror("Error", f"Download error: {str(e)}", parent=self.root)
-            else:
-                messagebox.showinfo("Update", "You have the latest version of the application.", parent=self.root)
-                
-        except Exception as e:
-            messagebox.showerror("Error", f"Could not check for updates: {str(e)}", parent=self.root)
-
-    def _is_newer_version(self, new_version, current_version):
-        return updater.is_newer_version(new_version, current_version)
+        messagebox.showinfo("About", f"{__app_name__} {__version__}\n\nA simple shortcut launcher.")
 
 if __name__ == "__main__":
-    root = ThemedTk(theme="equilux")
-    app = ShortcutLauncher(root)
-    if len(sys.argv) > 1:
-        app.add_shortcut(preselected_path=sys.argv[1])
-    root.mainloop()
+	try:
+		root = tk.Tk()
+		app = ShortcutLauncher(root)
+		print("Starting mainloop...")
+		root.mainloop()
+		print("Mainloop finished.")
+	except Exception as e:
+		print(f"An error occurred during execution: {e}")
